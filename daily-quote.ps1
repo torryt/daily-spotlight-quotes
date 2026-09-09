@@ -12,7 +12,8 @@ param(
     [string]$QuotesFile,
     [ValidateSet('BottomLeft', 'BottomCenter', 'Center')]
     [string]$Position    = 'BottomLeft',
-    [int]$MinWidth       = 1600   # ignore small/portrait assets
+    [int]$MinWidth       = 1600,  # ignore small/portrait assets
+    [int]$MaxLatest      = 20     # FILO buffer: max wallpapers kept in the latest folder
 )
 
 Add-Type -AssemblyName System.Drawing
@@ -23,8 +24,8 @@ $ErrorActionPreference = 'Stop'
 if (-not $QuotesFile) { $QuotesFile = Join-Path $PSScriptRoot 'quotes.txt' }
 $work     = Join-Path $env:LOCALAPPDATA 'DailyQuote'
 $pool     = Join-Path $work 'spotlight'
-$keepsakes = Join-Path $work 'keepsakes'
-New-Item -ItemType Directory -Force -Path $work, $pool, $keepsakes | Out-Null
+$latest   = Join-Path $work 'latest'
+New-Item -ItemType Directory -Force -Path $work, $pool, $latest | Out-Null
 
 # ---------------------------------------------------------------- quote ----
 $quotes = @(Get-Content $QuotesFile -Encoding UTF8 | Where-Object { $_.Trim() })
@@ -64,10 +65,12 @@ $quote = $quotes[$order[$next]].Trim()
 # is rarely updated.
 function Get-SpotlightFromApi {
     param(
-        [Parameter(Mandatory)][string]$Destination,
-        [int]$Count = 4
+        [Parameter(Mandatory)][string]$Destination
     )
-    $endpoint = 'https://fd.api.iris.microsoft.com/v4/api/selection?placement=88000820&bcnt={0}&country=US&locale=en-US&fmt=json' -f $Count
+    # Pool already has plenty to pick from, so just top it up with one new image
+    $poolCount = @(Get-ChildItem -Path $Destination -Filter *.jpg -File -ErrorAction SilentlyContinue).Count
+    $count = if ($poolCount -ge 10) { 1 } else { 4 }
+    $endpoint = 'https://fd.api.iris.microsoft.com/v4/api/selection?placement=88000820&bcnt={0}&country=US&locale=en-US&fmt=json' -f $count
     try {
         $resp = Invoke-RestMethod -Uri $endpoint -UseBasicParsing -TimeoutSec 20
     } catch {
@@ -92,7 +95,7 @@ function Get-SpotlightFromApi {
     }
 }
 
-Get-SpotlightFromApi -Destination $pool -Count 8
+Get-SpotlightFromApi -Destination $pool
 
 # ------------------------------------------------------ collect spotlight ----
 # Fallback: copy from the local Spotlight cache if API didn't provide anything
@@ -235,8 +238,7 @@ $g.Dispose()
 
 # ------------------------------------------------------------ save/set ----
 # New filename each time: Windows caches wallpaper per file path.
-# Keepsakes are kept as an archive, so previous images are not removed.
-$out = Join-Path $keepsakes ("wallpaper-{0}.jpg" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+$out = Join-Path $latest ("wallpaper-{0}.jpg" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 
 $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() |
          Where-Object { $_.MimeType -eq 'image/jpeg' }
@@ -245,6 +247,12 @@ $params.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter(
     [System.Drawing.Imaging.Encoder]::Quality, [int64]92)
 $bmp.Save($out, $codec, $params)
 $bmp.Dispose()
+
+# FILO buffer: keep only the $MaxLatest most recent wallpapers
+$existing = Get-ChildItem $latest -Filter 'wallpaper-*.jpg' -File | Sort-Object Name -Descending
+if ($existing.Count -gt $MaxLatest) {
+    $existing | Select-Object -Skip $MaxLatest | Remove-Item -Force -ErrorAction SilentlyContinue
+}
 
 # Fill mode
 Set-ItemProperty 'HKCU:\Control Panel\Desktop' -Name WallpaperStyle -Value '10'
